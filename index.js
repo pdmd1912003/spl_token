@@ -18,9 +18,9 @@ function loadOrCreateKeypair(filePath) {
     return keypair;
   }
 }
-(async () => {
-  const connection = new web3.Connection(web3.clusterApiUrl('devnet'), 'confirmed');
 
+async function main() {
+  const connection = new web3.Connection(web3.clusterApiUrl('devnet'), 'confirmed');
   const fromWallet = loadOrCreateKeypair(path.join(__dirname, 'wallet.json'));
   const toWallet = web3.Keypair.generate();
 
@@ -36,57 +36,54 @@ function loadOrCreateKeypair(filePath) {
   } else {
     console.log(`Balance: ${balance / web3.LAMPORTS_PER_SOL} SOL`);
   }
-  const mint = await splToken.createMint(
-    connection,
-    fromWallet,
+  const mintKeypair  = web3.Keypair.generate();
+  console.log('Mint Address:', mintKeypair.publicKey.toBase58());
+  
+  const mintSpace = splToken.MINT_SIZE;
+  const lamports = await connection.getMinimumBalanceForRentExemption(mintSpace);
+  
+  const createMintAccountInstruction = web3.SystemProgram.createAccount({
+    fromPubkey:fromWallet.publicKey,
+    newAccountPubkey:mintKeypair.publicKey,
+    space:mintSpace,
+    lamports,
+    programId: splToken.TOKEN_PROGRAM_ID,
+  });
+
+  const initializeMintAccountInstruction= splToken.createInitializeMintInstruction(
+    mintKeypair.publicKey,
+    9,
     fromWallet.publicKey,
-    null,
-    9
+    fromWallet.publicKey
   );
-  console.log('Mint Address:', mint.toBase58());
-  const fromTokenAccount = await splToken.getOrCreateAssociatedTokenAccount(
-    connection,
-    fromWallet,
-    mint,
+   const fromTokenAccount = await splToken.getAssociatedTokenAddress(
+    mintKeypair.publicKey,
     fromWallet.publicKey
   );
 
-  const toTokenAccount = await splToken.getOrCreateAssociatedTokenAccount(
-    connection,
-    fromWallet,
-    mint,
-    toWallet.publicKey
-  );
-  await splToken.mintTo(
-    connection,
-    fromWallet,
-    mint,
-    fromTokenAccount.address,
-    fromWallet,
-    1_000_000_000_000
-  );
-  console.log('Minted tokens to source wallet');
-
-  await splToken.transfer(
-    connection,
-    fromWallet,
-    fromTokenAccount.address,
-    toTokenAccount.address,
+  const associatedTokenAccountInstruction = splToken.createAssociatedTokenAccountInstruction(
     fromWallet.publicKey,
-    500_000_000_000
+    fromTokenAccount,
+    fromWallet.publicKey,
+    mintKeypair.publicKey
   );
-  console.log('Transferred tokens');
+  // Mint tokens instruction
+  const mintInstruction = splToken.createMintToInstruction(
+    mintKeypair.publicKey,
+    fromTokenAccount,
+    fromWallet.publicKey,
+    1_000_000_000_000 // amount
+  );
 
-  // === Tạo Metadata ===
+
   const metadataProgramId = new web3.PublicKey(
     'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s'
   );
-
   const [metadataPDA] = web3.PublicKey.findProgramAddressSync(
     [
       Buffer.from('metadata'),
       metadataProgramId.toBuffer(),
-      mint.toBuffer(),
+      mintKeypair.publicKey.toBuffer()
     ],
     metadataProgramId
   );
@@ -104,7 +101,7 @@ function loadOrCreateKeypair(filePath) {
   const metadataInstruction = createCreateMetadataAccountV3Instruction(
     {
       metadata: metadataPDA,
-      mint: mint,
+      mint: mintKeypair.publicKey,
       mintAuthority: fromWallet.publicKey,
       payer: fromWallet.publicKey,
       updateAuthority: fromWallet.publicKey,
@@ -117,14 +114,22 @@ function loadOrCreateKeypair(filePath) {
       },
     }
   );
-
-  const transaction = new web3.Transaction().add(metadataInstruction);
-
-  const sig = await web3.sendAndConfirmTransaction(
-    connection,
-    transaction,
-    [fromWallet]
+    const transaction = new web3.Transaction().add(
+      createMintAccountInstruction,
+      initializeMintAccountInstruction,
+      metadataInstruction,
+      associatedTokenAccountInstruction,
+      mintInstruction
   );
 
-  console.log('Created metadata tx:', sig);
-})();
+  const signature = await web3.sendAndConfirmTransaction(
+    connection,
+    transaction,
+    [fromWallet, mintKeypair] // Signers
+  );
+
+  console.log('Created metadata tx:', signature);
+}
+main().catch(err => {
+  console.error('Error:', err);
+});
